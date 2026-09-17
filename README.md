@@ -20,6 +20,14 @@
 
 > 本项目是非官方第三方用户脚本，与哔哩哔哩及其关联公司无隶属或合作关系。“哔哩哔哩”和“Bilibili”是其各自权利人的商标。
 
+## 实际效果
+
+<p align="center">
+  <img src="./assets/reader-screenshot.png" alt="Bilibili Office Reader 实际使用界面：纯文字动态列表、内容筛选与分组入口" width="100%">
+</p>
+
+<p align="center"><em>封面和花哨组件先下班，正文留下来继续值班。</em></p>
+
 ## 功能
 
 - 隐藏封面、图片和复杂界面，以纯文字列表展示动态。
