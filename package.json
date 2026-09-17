@@ -1,0 +1,14 @@
+{
+  "name": "bilibili-office-reader",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A low-distraction text reader for Bilibili dynamics.",
+  "scripts": {
+    "check": "node --check bilibili-office-reader.user.js",
+    "test": "node tests/reader.test.cjs",
+    "verify": "node --check bilibili-office-reader.user.js && node tests/reader.test.cjs"
+  },
+  "devDependencies": {
+    "jsdom": "^30.0.1"
+  }
+}
