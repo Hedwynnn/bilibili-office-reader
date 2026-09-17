@@ -1,4 +1,16 @@
-# Bilibili Office Reader
+<p align="center">
+  <img src="./assets/readme-banner.png" alt="Bilibili Office Reader — Read the feed. Keep your focus." width="100%">
+</p>
+
+<h1 align="center">Bilibili Office Reader</h1>
+
+<p align="center">
+  <a href="https://github.com/Hedwynnn/bilibili-office-reader/releases/tag/v1.0.0"><img alt="Version 1.0.0" src="https://img.shields.io/badge/version-1.0.0-ef7f72"></a>
+  <a href="./LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-566273"></a>
+  <a href="https://t.bilibili.com/"><img alt="Bilibili dynamics" src="https://img.shields.io/badge/runs%20on-t.bilibili.com-2f3845"></a>
+</p>
+
+<p align="center"><strong>Read the feed. Keep your focus.</strong></p>
 
 一个运行在 B 站动态页的低干扰纯文字阅读器，适合在不希望被封面、图片和复杂界面打断时阅读关注 UP 主的文字内容。
 
