@@ -45,7 +45,7 @@
 
 ### 从 Greasy Fork 安装
 
-Greasy Fork 页面发布后，这里将补充一键安装链接。
+[点击进入 Greasy Fork 安装页](https://greasyfork.org/zh-CN/scripts/596150-bilibili-office-reader)，然后选择“安装此脚本”即可。
 
 ### 从 GitHub 安装
 
