@@ -5,7 +5,7 @@
 <h1 align="center">Bilibili Office Reader</h1>
 
 <p align="center">
-  <a href="https://github.com/Hedwynnn/bilibili-office-reader/releases/tag/v1.0.0"><img alt="Version 1.0.0" src="https://img.shields.io/badge/version-1.0.0-ef7f72"></a>
+  <a href="https://github.com/Hedwynnn/bilibili-office-reader/releases/tag/v1.1.0"><img alt="Version 1.1.0" src="https://img.shields.io/badge/version-1.1.0-ef7f72"></a>
   <a href="./LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-566273"></a>
   <a href="https://t.bilibili.com/"><img alt="Bilibili dynamics" src="https://img.shields.io/badge/runs%20on-t.bilibili.com-2f3845"></a>
 </p>
@@ -36,7 +36,8 @@
 - 支持手动给 UP 主分组并按分组筛选。
 - 支持长文展开与收起。
 - 在右侧抽屉阅读对应动态的纯文字评论，支持分页、重试和滚动位置恢复。
-- 无操作一段时间后自动刷新；阅读长文、评论或设置时暂缓刷新。
+- 无操作一段时间后自动刷新；从其他页面切回时会检查是否过期，并保持当前阅读位置。
+- 刷新成功、失败和新动态数量均有明确提示。
 - 指定分组出现新动态时提供页内提醒，并可选择开启系统通知。
 - 支持字号、行距和正文预览设置。
 - 支持配置导出、导入、合并、替换和撤销。

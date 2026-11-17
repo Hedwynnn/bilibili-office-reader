@@ -2,7 +2,7 @@
 // @name              Bilibili Office Reader
 // @name:zh-CN        Bilibili 办公室阅读器
 // @namespace         https://github.com/Hedwynnn/bilibili-office-reader
-// @version           1.0.0
+// @version           1.1.0
 // @description       Turn Bilibili dynamics into a low-distraction text feed with filters, groups, and comments.
 // @description:zh-CN 将 B 站动态转换为低干扰的纯文字阅读界面，支持筛选、分组、评论阅读和空闲刷新。
 // @author            Hedwynnn
@@ -29,6 +29,7 @@
   const GROUP_FILTER_KEY = 'bilibili-office-reader-group-filter';
   const AUTO_REFRESH_KEY = 'bilibili-office-reader-auto-refresh';
   const REFRESH_MINUTES_KEY = 'bilibili-office-reader-refresh-minutes';
+  const LAST_CHECKED_KEY = 'bilibili-office-reader-last-successful-check';
   const ALERT_GROUPS_KEY = 'bilibili-office-reader-alert-groups';
   const ID = 'bor-reader';
   let enabled = GM_getValue(KEY, true);
@@ -40,7 +41,8 @@
   let autoRefresh = GM_getValue(AUTO_REFRESH_KEY, false);
   let refreshMinutes = Number(GM_getValue(REFRESH_MINUTES_KEY, 5));
   let lastActivityAt = Date.now();
-  let lastCheckedAt = 0;
+  let lastCheckedAt = Number(GM_getValue(LAST_CHECKED_KEY, 0)) || 0;
+  let refreshError = '';
   let activeCommentKey = '';
   const commentStateByKey = new Map();
   const commentAreaByKey = new Map();
@@ -869,24 +871,32 @@
     const reader = document.createElement('section');
     reader.id = ID;
     reader.innerHTML = `<header class="bor-header">
-      <div><h1>信息动态</h1><p id="bor-status">正在读取……</p><p id="bor-refresh-status"></p></div>
-      <div class="bor-actions">
-        <select id="bor-group-filter" title="按UP主分组筛选"></select>
-        <button data-filter="all">全部动态</button>
-        <button data-filter="no-video">排除视频</button>
-        <button data-filter="text-only">纯文字</button>
+      <div class="bor-header-main">
+        <div class="bor-heading"><h1>信息动态</h1><p id="bor-status" role="status">正在读取……</p></div>
+        <div class="bor-actions">
+        <select id="bor-group-filter" aria-label="按 UP 主分组筛选"></select>
+        <div class="bor-filter-group" role="group" aria-label="内容类型筛选">
+          <button data-filter="all" aria-pressed="false">全部动态</button>
+          <button data-filter="no-video" aria-pressed="false">排除视频</button>
+          <button data-filter="text-only" aria-pressed="false">纯文字</button>
+        </div>
         <button id="bor-check-now">立即检查</button>
         <details class="bor-settings-menu"><summary>设置</summary><div class="bor-settings-popover">
         <button id="bor-manage-groups">管理分组</button><button id="bor-settings">阅读与备份</button>
         <label class="bor-auto-refresh"><input id="bor-auto-refresh" type="checkbox" ${autoRefresh ? 'checked' : ''}><span>空闲刷新</span></label>
-        <select id="bor-refresh-minutes" title="无操作多久后检查">
+        <select id="bor-refresh-minutes" aria-label="无操作多久后检查">
           ${[1, 3, 5, 10, 30].map(value => `<option value="${value}" ${value === refreshMinutes ? 'selected' : ''}>${value}分钟</option>`).join('')}
         </select>
         <button id="bor-original">返回原版</button>
         </div></details>
+        </div>
+      </div>
+      <div class="bor-header-sub">
+        <p id="bor-refresh-status" role="status" aria-live="polite"></p>
+        <button id="bor-new-items" hidden></button>
       </div>
     </header><main id="bor-feed"></main>
-    <div id="bor-footer"><span id="bor-hidden-info"></span><button id="bor-load-more">继续查找更早动态</button></div>`;
+    <div id="bor-footer"><button id="bor-hidden-info"></button><button id="bor-load-more">继续查找更早动态</button></div>`;
     document.body.appendChild(reader);
     applyPreferences();
     updateGroupSelect();
@@ -931,6 +941,12 @@
       }
       if (event.target.closest('#bor-check-now')) {
         softRefresh(true);
+        return;
+      }
+      if (event.target.closest('#bor-new-items')) {
+        const behavior = prefersReducedMotion() ? 'auto' : 'smooth';
+        reader.scrollTo?.({ top: 0, behavior });
+        event.target.closest('#bor-new-items').hidden = true;
         return;
       }
       if (event.target.closest('.bor-comment-close')) {
@@ -1010,6 +1026,7 @@
 
     reader.addEventListener('scroll', () => {
       markActivity();
+      if (reader.scrollTop < 40) document.getElementById('bor-new-items')?.setAttribute('hidden', '');
       const remain = reader.scrollHeight - reader.scrollTop - reader.clientHeight;
       if (remain < 500 && reader.scrollHeight > reader.clientHeight + 100) requestMore();
     }, { passive: true });
@@ -1030,20 +1047,39 @@
 
   function updateRefreshStatus() {
     const status = document.getElementById('bor-refresh-status');
+    const button = document.getElementById('bor-check-now');
     if (!status) return;
+    if (button) {
+      button.disabled = refreshing;
+      button.textContent = refreshing ? '检查中……' : '立即检查';
+    }
+    if (refreshing) {
+      status.textContent = `正在检查新动态…… · 上次成功：${formatClock(lastCheckedAt)}`;
+      return;
+    }
+    if (refreshError) {
+      status.textContent = `${refreshError} · 上次成功：${formatClock(lastCheckedAt)}`;
+      return;
+    }
     if (!autoRefresh) {
       status.textContent = `自动检查已关闭 · 上次检查：${formatClock(lastCheckedAt)}`;
       return;
     }
     const base = Math.max(lastActivityAt, lastCheckedAt);
     const remaining = Math.max(0, refreshMinutes * 60000 - (Date.now() - base));
-    status.textContent = `${refreshing ? '正在检查新动态' : `无操作 ${Math.ceil(remaining / 60000)} 分钟后检查`} · 上次检查：${formatClock(lastCheckedAt)}`;
+    status.textContent = `无操作 ${Math.ceil(remaining / 60000)} 分钟后检查 · 上次成功：${formatClock(lastCheckedAt)}`;
+  }
+
+  function prefersReducedMotion() {
+    return window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
   }
 
   function showToast(message) {
     document.getElementById('bor-toast')?.remove();
     const toast = document.createElement('div');
     toast.id = 'bor-toast';
+    toast.setAttribute('role', 'status');
+    toast.setAttribute('aria-live', 'polite');
     toast.textContent = message;
     document.getElementById(ID)?.appendChild(toast);
     setTimeout(() => toast.remove(), 4200);
@@ -1100,46 +1136,81 @@
       || null;
   }
 
+  function finishRefresh(previousKeys, manual) {
+    const items = collect();
+    const newItems = items.filter(item => !previousKeys.has(item.key));
+    const newCount = newItems.length;
+    refreshing = false;
+    lastCheckedAt = Date.now();
+    refreshError = '';
+    GM_setValue(LAST_CHECKED_KEY, lastCheckedAt);
+    render();
+    updateRefreshStatus();
+    notifyNewItems(newItems);
+    const reader = document.getElementById(ID);
+    const newItemsButton = document.getElementById('bor-new-items');
+    if (newCount && reader?.scrollTop > 40 && newItemsButton) {
+      newItemsButton.textContent = `发现 ${newCount} 条新动态，回到顶部查看`;
+      newItemsButton.hidden = false;
+    }
+    if (newCount) showToast(`已发现并载入 ${newCount} 条新动态`);
+    else if (manual) showToast('检查完成，暂未发现新动态');
+  }
+
   function softRefresh(manual = false) {
     if (refreshing || document.visibilityState === 'hidden') return;
     refreshing = true;
-    lastCheckedAt = Date.now();
+    refreshError = '';
     updateRefreshStatus();
     const previousKeys = new Set(sourceByKey.keys());
     const control = findSoftRefreshControl();
 
-    document.documentElement.classList.add('bor-loading-source');
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-    if (control) control.click();
-
-    setTimeout(() => document.documentElement.classList.remove('bor-loading-source'), 500);
-    setTimeout(() => {
-      const items = collect();
-      const newItems = items.filter(item => !previousKeys.has(item.key));
-      const newCount = newItems.length;
+    if (!control) {
       refreshing = false;
-      lastCheckedAt = Date.now();
-      render();
+      refreshError = '未找到 B 站刷新入口，可稍后重试';
       updateRefreshStatus();
-      notifyNewItems(newItems);
-      if (!control) showToast('未找到B站的软刷新入口；本次没有强制重载页面。');
-      else if (newCount) showToast(`已发现并载入 ${newCount} 条新动态`);
-      else if (manual) showToast('检查完成，暂未发现新动态');
-    }, 1800);
-  }
-
-  function checkIdleRefresh() {
-    updateRefreshStatus();
-    if (!enabled || !autoRefresh || refreshing || document.visibilityState === 'hidden') return;
-    const reader = document.getElementById(ID);
-    if (activeCommentKey || document.querySelector('.bor-modal-backdrop') || reader?.scrollTop > 40
-      || document.querySelector('.bor-expand[aria-expanded="true"]')) {
-      const status = document.getElementById('bor-refresh-status');
-      if (status) status.textContent = '正在阅读，已暂缓自动刷新 · 可手动检查';
+      showToast(refreshError);
       return;
     }
-    const base = Math.max(lastActivityAt, lastCheckedAt);
-    if (Date.now() - base >= refreshMinutes * 60000) softRefresh(false);
+
+    document.documentElement.classList.add('bor-loading-source');
+    window.scrollTo({ top: 0, behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
+
+    let settled = false;
+    let settleTimer = 0;
+    const complete = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(settleTimer);
+      observer.disconnect();
+      document.documentElement.classList.remove('bor-loading-source');
+      finishRefresh(previousKeys, manual);
+    };
+    const observer = new MutationObserver(records => {
+      if (!records.some(record => !record.target.closest?.(`#${ID}`))) return;
+      clearTimeout(settleTimer);
+      settleTimer = setTimeout(complete, 900);
+    });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    control.click();
+
+    // B 站无新内容时可能不产生可观察变更，仍在合理等待后完成检查。
+    setTimeout(complete, 6500);
+  }
+
+  function refreshDue(resuming = false, now = Date.now()) {
+    const base = resuming ? lastCheckedAt : Math.max(lastActivityAt, lastCheckedAt);
+    return now - base >= refreshMinutes * 60000;
+  }
+
+  function checkIdleRefresh(resuming = false) {
+    updateRefreshStatus();
+    if (!enabled || !autoRefresh || refreshing || document.visibilityState === 'hidden') return;
+    if (!sourceByKey.size) {
+      schedule();
+      return;
+    }
+    if (refreshDue(resuming)) softRefresh(false);
   }
 
   function requestMore() {
@@ -1257,7 +1328,9 @@
     if (hiddenInfo) hiddenInfo.textContent = hiddenTotal ? `已隐藏 ${hiddenTotal} 条（查看原因）` : '没有隐藏内容';
     updateGroupSelect();
     document.querySelectorAll(`#${ID} [data-filter]`).forEach(button => {
-      button.classList.toggle('active', button.dataset.filter === filter);
+      const active = button.dataset.filter === filter;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', String(active));
     });
   }
 
@@ -1304,19 +1377,36 @@
       }
       #bor-reader * { box-sizing: border-box; }
       .bor-header {
-        position: sticky; top: 0; z-index: 2; display: flex;
-        justify-content: space-between; align-items: center; gap: 24px;
-        padding: 16px max(24px, calc((100vw - 980px) / 2));
+        position: sticky; top: 0; z-index: 2;
+        padding: 12px max(24px, calc((100vw - 980px) / 2)) 9px;
         border-bottom: 1px solid #d8dde3; background: rgba(255,255,255,.97);
       }
+      .bor-header-main {
+        display: flex; justify-content: space-between; align-items: center; gap: 24px;
+      }
+      .bor-heading { min-width: 150px; }
       .bor-header h1 { margin: 0; font-size: 18px; font-weight: 650; }
       .bor-header p { margin: 2px 0 0; color: #7a8491; font-size: 12px; }
-      #bor-refresh-status { color: #929aa5; }
-      .bor-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+      .bor-header-sub {
+        display: flex; align-items: center; justify-content: space-between; gap: 12px;
+        min-height: 20px; margin-top: 4px;
+      }
+      #bor-refresh-status { color: #7f8995; font-variant-numeric: tabular-nums; }
+      #bor-new-items {
+        border: 0; padding: 1px 0; color: #385a7a; background: transparent;
+        font: inherit; font-size: 12px; cursor: pointer;
+      }
+      #bor-new-items:hover { color: #1f3f5d; text-decoration: underline; }
+      .bor-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+      .bor-filter-group { display: inline-flex; }
       .bor-actions button {
         border: 1px solid #cbd2da; border-radius: 4px; padding: 6px 11px;
         color: #4b5563; background: #fff; cursor: pointer;
       }
+      .bor-actions button:disabled { color: #8a939e; background: #f3f5f7; cursor: wait; }
+      .bor-actions .bor-filter-group button { border-radius: 0; margin-left: -1px; }
+      .bor-actions .bor-filter-group button:first-child { margin-left: 0; border-radius: 4px 0 0 4px; }
+      .bor-actions .bor-filter-group button:last-child { border-radius: 0 4px 4px 0; }
       .bor-actions select {
         min-width: 120px; border: 1px solid #cbd2da; border-radius: 4px;
         padding: 6px 28px 6px 9px; color: #374151; background: #fff;
@@ -1334,7 +1424,10 @@
         width: min(980px, calc(100% - 40px)); margin: 18px auto;
         border: 1px solid #d9dee5; border-bottom: 0; background: #fff;
       }
-      .bor-item { padding: 16px 20px 15px; border-bottom: 1px solid #e2e6eb; }
+      .bor-item {
+        padding: 16px 20px 15px; border-bottom: 1px solid #e2e6eb;
+        content-visibility: auto; contain-intrinsic-size: auto 180px;
+      }
       .bor-item:hover { background: #fafbfc; }
       .bor-meta { display: flex; align-items: center; gap: 8px 10px; flex-wrap: wrap; margin-bottom: 7px; }
       .bor-author { color: #1f2937; font-weight: 650; }
@@ -1382,7 +1475,10 @@
         display: flex; justify-content: center; align-items: center; gap: 14px;
         padding: 4px 0 28px; color: #929ba6; font-size: 12px;
       }
-      #bor-hidden-info { cursor: pointer; }
+      #bor-hidden-info {
+        border: 0; padding: 0; color: inherit; background: transparent;
+        font: inherit; cursor: pointer;
+      }
       #bor-hidden-info:hover { color: #596579; text-decoration: underline; }
       #bor-load-more {
         border: 1px solid #cbd2da; border-radius: 4px; padding: 6px 12px;
@@ -1477,9 +1573,15 @@
         font-size: 13px;
       }
       @media (max-width: 720px) {
-        .bor-header { align-items: flex-start; flex-direction: column; gap: 10px; padding: 12px 16px; }
+        .bor-header { padding: 10px 16px 8px; }
+        .bor-header-main { align-items: flex-start; flex-direction: column; gap: 8px; }
+        .bor-actions { justify-content: flex-start; }
+        .bor-header-sub { align-items: flex-start; flex-direction: column; gap: 2px; }
         #bor-feed { width: calc(100% - 20px); margin: 10px auto; }
         .bor-item { padding: 14px; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #bor-reader { scroll-behavior: auto; }
       }
     `;
     document.head.appendChild(style);
@@ -1492,10 +1594,12 @@
     }).observe(document.body, { childList: true, subtree: true });
     toggle(enabled);
     [600, 1600, 3200].forEach(delay => setTimeout(schedule, delay));
-    setInterval(checkIdleRefresh, 15000);
+    setInterval(() => checkIdleRefresh(false), 15000);
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') checkIdleRefresh();
+      if (document.visibilityState === 'visible') checkIdleRefresh(true);
     });
+    window.addEventListener('focus', () => checkIdleRefresh(true));
+    window.addEventListener('pageshow', () => checkIdleRefresh(true));
     document.addEventListener('keydown', event => {
       if (event.key === 'Escape' && document.querySelector('.bor-modal-backdrop')) {
         document.querySelector('.bor-modal-backdrop')?.remove();

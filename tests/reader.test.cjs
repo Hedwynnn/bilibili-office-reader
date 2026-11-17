@@ -9,7 +9,7 @@ const responses = [], requests = [];
 w.GM_getValue = (k, fallback) => storage.has(k) ? structuredClone(storage.get(k)) : fallback;
 w.GM_setValue = (k, v) => storage.set(k, structuredClone(v));
 w.GM_xmlhttpRequest = options => { requests.push(options.url); const response = responses.shift(); if (response === 'error') options.onerror(); else options.onload({ status: 200, responseText: JSON.stringify(response) }); };
-w.eval(script.replace(/\n  GM_registerMenuCommand[\s\S]*$/, '\n  window.testApi = { render, extract, openComments, closeComments, loadCommentsPage, commentStateByKey, sourceByKey, backupData, validateBackup, applyBackup, groupsFor, openSettings, manageGroups };\n})();'));
+w.eval(script.replace(/\n  GM_registerMenuCommand[\s\S]*$/, '\n  window.testApi = { render, extract, openComments, closeComments, loadCommentsPage, commentStateByKey, sourceByKey, backupData, validateBackup, applyBackup, groupsFor, openSettings, manageGroups, refreshDue };\n})();'));
 const t = w.testApi;
 const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
 const page = (next, ids, end = false) => ({ code: 0, data: { cursor: { next, is_end: end, all_count: 40 }, replies: ids.map(id => ({ rpid_str: id, member: { uname: '评论者' }, content: { message: `正文 ${id}` } })) } });
@@ -19,6 +19,8 @@ function check(name, fn) { fn(); passed++; console.log('PASS', name); }
   t.render();
   const source = w.document.querySelector('.bili-dyn-item');
   const key = t.extract(source).key;
+  check('切回页面按上次成功检查时间判断过期', () => { assert.equal(t.refreshDue(true, 299999), false); assert.equal(t.refreshDue(true, 300000), true); });
+  check('刷新控件具有可访问状态', () => { assert.equal(w.document.querySelector('#bor-group-filter').getAttribute('aria-label'), '按 UP 主分组筛选'); assert.equal(w.document.querySelector('#bor-refresh-status').getAttribute('aria-live'), 'polite'); });
   check('旧名称分组在取得 UID 后仍可读', () => assert.equal(t.groupsFor('测试作者', '999')[0], '财经'));
   const native = source.querySelector('.bili-rich-text__action');
   native.onclick = () => { const expanded = native.textContent === '展开'; native.textContent = expanded ? '收起' : '展开'; source.querySelector('.bili-rich-text__content').textContent = expanded ? '长文详情' : '短文'; };
