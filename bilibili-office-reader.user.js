@@ -2,7 +2,7 @@
 // @name              Bilibili Office Reader
 // @name:zh-CN        Bilibili 办公室阅读器
 // @namespace         https://github.com/Hedwynnn/bilibili-office-reader
-// @version           1.1.0
+// @version           1.2.0
 // @description       Turn Bilibili dynamics into a low-distraction text feed with filters, groups, and comments.
 // @description:zh-CN 将 B 站动态转换为低干扰的纯文字阅读界面，支持筛选、分组、评论阅读和空闲刷新。
 // @author            Hedwynnn
@@ -21,6 +21,9 @@
 
 (() => {
   'use strict';
+
+  // 個別の投稿は「原動態を開く」の遷移先としてそのまま表示する。
+  if (/^\/(?:[a-z]{2}(?:-[a-z]+)?\/)?(?:\d+|opus|dynamic)(?:\/|$)/i.test(location.pathname)) return;
 
   const KEY = 'bilibili-office-reader-enabled';
   const GROUPS_KEY = 'bilibili-office-reader-groups';
@@ -41,11 +44,13 @@
   let autoRefresh = GM_getValue(AUTO_REFRESH_KEY, false);
   let refreshMinutes = Number(GM_getValue(REFRESH_MINUTES_KEY, 5));
   let lastActivityAt = Date.now();
+  let lastAttemptAt = 0;
+  let cancelRefresh = null;
   let lastCheckedAt = Number(GM_getValue(LAST_CHECKED_KEY, 0)) || 0;
   let refreshError = '';
   let activeCommentKey = '';
   const commentStateByKey = new Map();
-  const commentAreaByKey = new Map();
+  const SOURCE_SELECTOR = '.bili-dyn-item, .bili-dyn-list__item';
   let titleResetTimer = 0;
   const originalTitle = document.title;
   let hiddenStats = { live: 0, charging: 0, empty: 0 };
@@ -260,10 +265,10 @@
   function manageGroups() {
     const alerted = new Set(alertGroups);
     const rows = groups.length
-      ? groups.map(name => `<div class="bor-group-row" data-old-name="${esc(name)}"><input type="text" value="${esc(name)}"><label class="bor-group-alert" title="该分组刷新出新动态时提醒"><input type="checkbox" ${alerted.has(name) ? 'checked' : ''}><span>提醒</span></label><button class="bor-delete-group" title="删除分组">删除</button></div>`).join('')
+      ? groups.map(name => `<div class="bor-group-row" data-old-name="${esc(name)}"><input type="text" aria-label="分组名称" value="${esc(name)}"><label class="bor-group-alert" title="该分组刷新出新动态时提醒"><input type="checkbox" ${alerted.has(name) ? 'checked' : ''}><span>提醒</span></label><button class="bor-delete-group" title="删除分组">删除</button></div>`).join('')
       : '<p class="bor-help">目前还没有分组。</p>';
     const modal = openModal('管理分组', `
-      <p class="bor-help">勾选“提醒”后，该分组刷新出新动态时会显示页面提示并发送系统通知。可以直接重命名；删除分组不会取消关注UP主。</p>
+      <p class="bor-help">勾选后，有新动态时会在页内提醒。系统通知可在「阅读与备份」中开启。</p>
       <div id="bor-group-rows">${rows}</div>
       <label class="bor-field"><span>新建分组</span><input id="bor-create-groups" type="text" placeholder="多个名称可用逗号分隔"></label>
       <footer><button class="bor-modal-cancel">取消</button><button class="bor-primary" id="bor-save-groups">保存修改</button></footer>`);
@@ -347,40 +352,44 @@
   }
 
   function dynamicIdFromLink(value) {
-    return String(value || '').match(/(?:\/opus\/|\/dynamic\/|t\.bilibili\.com\/)(\d+)/)?.[1] || '';
+    if (!value) return '';
+    try {
+      const url = new URL(value, location.href);
+      if (!/^https?:$/.test(url.protocol)) return '';
+      if (url.hostname === 't.bilibili.com') return url.pathname.match(/^\/(\d+)\/?$/)?.[1] || '';
+      if (url.hostname === 'www.bilibili.com' || url.hostname === 'm.bilibili.com')
+        return url.pathname.match(/^\/(?:opus|dynamic)\/(\d+)\/?$/)?.[1] || '';
+    } catch (_) { /* ページ上の不完全なリンクを無視する。 */ }
+    return '';
   }
 
   function dynamicIdOf(root) {
     const attributes = ['data-did', 'data-dynamic-id', 'data-dynamic-id-str'];
-    for (const element of [root, ...root.querySelectorAll('*')]) {
+    const wrapper = root.closest('.bili-dyn-list__item');
+    const metadata = root.querySelectorAll('[data-did], [data-dynamic-id], [data-dynamic-id-str], [data-url]');
+    const owned = [...metadata].filter(element =>
+      element.closest(SOURCE_SELECTOR) === root &&
+      !element.closest('.bili-dyn-content, .bili-rich-text, .bili-rich-text__content, .bili-dyn-item__orig, .bili-dyn-content__orig__reference, bili-comments'));
+    for (const element of [root, wrapper, ...owned].filter(Boolean)) {
       for (const name of attributes) {
         const value = element.getAttribute?.(name);
         if (/^\d+$/.test(value || '')) return value;
       }
-    }
-    for (const element of root.querySelectorAll('[data-url]')) {
       const id = dynamicIdFromLink(element.getAttribute('data-url'));
       if (id) return id;
     }
-    for (const anchor of root.querySelectorAll('a[href]')) {
-      const id = dynamicIdFromLink(anchor.href || anchor.getAttribute('href'));
+    for (const time of root.querySelectorAll('.bili-dyn-time, .bili-dyn-title__pub-time, [data-module="time"]')) {
+      if (time.closest('.bili-dyn-content, .bili-rich-text, .bili-dyn-item__orig')) continue;
+      const id = dynamicIdFromLink(time.getAttribute('data-url')) || dynamicIdFromLink(time.closest('a[href]')?.href || time.querySelector('a[href]')?.href);
       if (id) return id;
     }
     return '';
   }
 
   function dynamicLinkOf(root, dynamicId = '') {
-    const dataUrl = [...root.querySelectorAll('[data-url]')]
-      .map(element => element.getAttribute('data-url'))
-      .find(value => dynamicIdFromLink(value));
-    const link = hrefOf(root, [
-      'a[href*="/opus/"]', 'a[href*="t.bilibili.com/"]',
-      'a[href*="/dynamic/"]', 'a.bili-dyn-time', '.bili-dyn-time a',
-      'a[href*="/video/"]'
-    ]);
     if (dynamicId) return `https://www.bilibili.com/opus/${dynamicId}`;
-    if (dataUrl) return new URL(dataUrl, location.href).href;
-    return link;
+    const video = hrefOf(root, ['a.bili-dyn-card-video[href]', '.bili-dyn-card-video a[href]']);
+    return /^https:\/\/www\.bilibili\.com\/video\/(?:BV\w+|av\d+)/i.test(video) ? video : '';
   }
 
   function findExpandControl(root) {
@@ -409,8 +418,7 @@
   function commentCountOf(root) {
     const control = findCommentControl(root);
     const text = clean(control?.innerText || control?.textContent);
-    const matched = text.match(/\d+/);
-    return matched ? Number(matched[0]) : null;
+    return text.match(/\d+(?:[,.]\d+)*(?:万|亿|[kKwW])?\+?/)?.[0] || null;
   }
 
   function deepQueryAll(root, selector) {
@@ -442,30 +450,15 @@
       '.bili-dyn-item__footer [class*="reply"]', '[class*="comment-container"]',
       '[class*="reply-list"]', '[class*="comment-list"]'
     ];
-    const areas = [];
-    for (const selector of selectors) {
-      for (const area of deepQueryAll(root, selector)) {
-        if (!area.closest?.(`#${ID}`) && !areas.some(parent => parent.contains(area))) areas.push(area);
-      }
-    }
-    return areas;
+    return deepQueryAll(root, selectors.join(',')).filter(area => {
+      const owner = area.getRootNode().host || area;
+      return !owner.closest('.bili-dyn-item__orig, .bili-dyn-content__orig__reference') &&
+        (!owner.closest(SOURCE_SELECTOR) || owner.closest(SOURCE_SELECTOR) === root);
+    });
   }
 
-  function findCommentArea(root, key = '') {
-    const local = findCommentAreas(root)[0];
-    if (local) {
-      if (key) commentAreaByKey.set(key, local);
-      return local;
-    }
-    if (key && commentAreaByKey.has(key) && document.contains(commentAreaByKey.get(key))
-      && root.contains(commentAreaByKey.get(key))) {
-      return commentAreaByKey.get(key);
-    }
-    return null;
-  }
-
-  function extractComments(root, key = '') {
-    const area = findCommentArea(root, key);
+  function extractComments(root) {
+    const area = findCommentAreas(root)[0];
     if (!area) return [];
     let nodes = deepQueryAll(area, '.root-reply-container, .sub-reply-item, bili-comment-thread-renderer, bili-comment-renderer');
     if (!nodes.length) nodes = deepQueryAll(area, '.reply-item, [class*="reply-item"], [class*="comment-item"]');
@@ -495,15 +488,16 @@
       '.bili-dyn-time', '.bili-dyn-title__pub-time',
       '[class*="pub-time"]', '[class*="dyn-time"]'
     ]);
-    const body = textOf(node, [
+    const richText = textOf(node, [
       '.bili-rich-text__content', '.bili-rich-text',
-      '.bili-dyn-content__orig__desc', '.bili-dyn-content',
+      '.bili-dyn-content__orig__desc',
       '[class*="rich-text"]'
     ]);
     const videoTitle = textOf(node, [
       '.bili-dyn-card-video__title', '.bili-dyn-card-video__desc',
       '[class*="dyn-card-video"] [class*="title"]'
     ]);
+    const body = richText || videoTitle || textOf(node, ['.bili-dyn-content']);
     const dynamicId = dynamicIdOf(node);
     const link = dynamicLinkOf(node, dynamicId);
     const authorLink = hrefOf(node, [
@@ -525,17 +519,22 @@
       : clean(body || videoTitle);
 
     // ページ構造を優先し、通常本文の単語だけでは除外しない。
-    const fullText = clean(node.innerText || node.textContent);
     const hasLiveCard = Boolean(node.querySelector(
         '.bili-dyn-card-live, [class*="dyn-card-live"], [class*="live-card"]'
       ));
     const isLiveNotice = hasLiveCard || /^(直播了|正在直播|直播中)$/.test(clean(time));
-    const hasLockedCard = Boolean(node.querySelector(
-      '[class*="charging"], [class*="paywall"], [class*="locked"], [class*="onlyfans"]'
-    ));
-    const hasChargingPrompt = /(?:充电专属|专属动态|包月充电)/.test(fullText)
-      && /(?:解锁观看|加入当前UP主|充电可见)/.test(fullText);
-    const isChargingOnly = hasLockedCard || hasChargingPrompt;
+    const lockPrompt = /解锁观看|充电后(?:可见|查看|观看)|充电可见|加入当前UP主|开通后查看|立即解锁/;
+    const gates = node.querySelectorAll('[class*="charging"], [class*="paywall"], [class*="locked"], [class*="onlyfans"]');
+    const gated = [...gates].some(gate => {
+      if (gate.closest('.bili-rich-text, .bili-rich-text__content') || gate.hidden || gate.closest('[hidden], [aria-hidden="true"]')) return false;
+      // 読める本文やコメントで言及された文言は課金状態の根拠にしない。
+      const copy = gate.cloneNode(true);
+      copy.querySelectorAll('.bili-rich-text, .bili-rich-text__content, bili-comments').forEach(el => el.remove());
+      return lockPrompt.test(clean(copy.textContent));
+    });
+    const isChargingOnly = gated || [...node.querySelectorAll('button, [role="button"], a')].some(control =>
+      !control.closest('.bili-rich-text, .bili-rich-text__content, bili-comments, [hidden], [aria-hidden="true"]') &&
+      /^(?:充电后(?:可见|查看|观看)|充电可见|充电解锁(?:观看)?)$/.test(clean(control.textContent)));
     const isEmpty = !clean(content);
 
     if (isLiveNotice) return { skipReason: 'live' };
@@ -545,8 +544,8 @@
     const stableLinkId = dynamicId || dynamicIdFromLink(link);
     const commentCount = commentCountOf(node);
     // Without a public ID, expanding text or a relative timestamp must not change identity.
-    const key = stableSourceKeys.get(node) || (stableLinkId ? `dynamic:${stableLinkId}`
-      : `${fingerprint(author)}|${fingerprint(time)}|${fingerprint(content)}|${fingerprint(videoTitle)}`);
+    const key = stableLinkId ? `dynamic:${stableLinkId}` : stableSourceKeys.get(node)
+      || `${fingerprint(author)}|${fingerprint(time)}|${fingerprint(content)}|${fingerprint(videoTitle)}`;
     stableSourceKeys.set(node, key);
 
     return {
@@ -564,11 +563,11 @@
     const sourceNodes = innerNodes.length
       ? innerNodes
       : [...document.querySelectorAll('.bili-dyn-list__item')];
-    const nodes = sourceNodes.filter(node => !node.closest(`#${ID}`));
+    const nodes = sourceNodes.filter(node => !node.parentElement?.closest('.bili-dyn-item') && !node.closest(`#${ID}`));
     const seen = new Set();
     sourceByKey.clear();
     hiddenStats = { live: 0, charging: 0, empty: 0 };
-    return nodes.map(node => ({ item: extract(node), node })).filter(entry => {
+    const items = nodes.map(node => ({ item: extract(node), node })).filter(entry => {
       if (entry.item?.skipReason) {
         hiddenStats[entry.item.skipReason] += 1;
         return false;
@@ -578,20 +577,19 @@
       sourceByKey.set(entry.item.key, entry.node);
       return true;
     }).map(entry => entry.item);
+    for (const key of commentStateByKey.keys()) {
+      if (key !== activeCommentKey && !sourceByKey.has(key)) commentStateByKey.delete(key);
+    }
+    return items;
   }
 
-  function card(item) {
+  function card(item, assigned) {
     const type = item.kind === 'video' ? '视频'
       : item.kind === 'image' ? `图片 ${item.imageCount}` : '文字';
-    const assigned = groupsFor(item.author, item.authorId);
     const groupTags = assigned.map(name =>
-      `<span class="bor-group-tag">${esc(name)}</span>`
+      `<button class="bor-group-tag" data-group="${esc(name)}" aria-label="只看${esc(name)}分组">${esc(name)}</button>`
     ).join('');
-    const renderState = JSON.stringify([
-      item.author, item.time, item.content, item.mediaTitle,
-      item.expandable, item.expanded, activeCommentKey === item.key, assigned, item.kind, item.imageCount, item.commentCount, item.link, item.dynamicId
-    ]);
-    return `<article class="bor-item" data-key="${esc(item.key)}" data-render-state="${esc(renderState)}" data-kind="${item.kind}">
+    return `<article class="bor-item" data-key="${esc(item.key)}" data-kind="${item.kind}">
       <div class="bor-meta">
         <span class="bor-author">${esc(item.author)}</span>
         <span class="bor-time">${esc(item.time || '时间未知')}</span>
@@ -601,12 +599,12 @@
       </div>
       <div class="bor-content">${esc(item.content)}</div>
       ${item.mediaTitle ? `<div class="bor-media">${esc(item.mediaTitle)}</div>` : ''}
-      ${item.expandable ? `<button class="bor-expand" aria-expanded="${item.expanded}" data-expand-key="${esc(item.key)}">${item.expanded ? '收起全文' : '展开全文'}</button>` : ''}
+      <footer class="bor-item-actions">${item.expandable ? `<button class="bor-expand" aria-expanded="${item.expanded}" data-expand-key="${esc(item.key)}">${item.expanded ? '收起全文' : '展开全文'}</button>` : ''}
       <button class="bor-comments" aria-expanded="${activeCommentKey === item.key}" data-comment-key="${esc(item.key)}">${activeCommentKey === item.key ? '收起评论' : '查看评论'}${item.commentCount !== null ? `（${item.commentCount}）` : ''}</button>
       ${item.link
         ? `<a class="bor-link" href="${esc(item.link)}" target="_blank" rel="noopener">${item.link.includes('/video/') ? '打开视频' : '打开原动态'} ↗</a>`
         : `<button class="bor-link bor-open-source" data-source-key="${esc(item.key)}">打开原动态 ↗</button>`}
-    </article>`;
+      </footer></article>`;
   }
 
   function commentHtml(comment) {
@@ -643,12 +641,15 @@
   }
 
   function parseCommentParams(source) {
-    const value = source?.querySelector('bili-comments[data-params]')?.getAttribute('data-params') || '';
+    const component = [...source.querySelectorAll('bili-comments[data-params]')].find(element =>
+      !element.closest('.bili-dyn-item__orig, .bili-dyn-content__orig__reference') &&
+      element.closest(SOURCE_SELECTOR) === source);
+    const value = component?.getAttribute('data-params') || '';
     const [type, oid] = value.split(',').map(part => part.trim());
     return /^\d+$/.test(type) && /^\d+$/.test(oid) ? { type, oid } : null;
   }
 
-  function waitForCommentParams(source, key) {
+  function waitForCommentParams(source) {
     return new Promise(resolve => {
       const startedAt = Date.now();
       const check = () => {
@@ -683,7 +684,7 @@
     const control = findCommentControl(source);
     if (!control) throw new Error('没有找到这条动态的评论入口');
     if (!parseCommentParams(source)) control.click();
-    const params = await waitForCommentParams(source, key);
+    const params = await waitForCommentParams(source);
     if (params) {
       if (params.type === '17') state.dynamicId = params.oid;
       return params;
@@ -714,10 +715,9 @@
 
   function commentFallbackLink(key) {
     const source = sourceByKey.get(key);
-    if (!source) return '';
     const dynamicId = commentStateByKey.get(key)?.dynamicId
-      || key.match(/^dynamic:(\d+)$/)?.[1] || dynamicIdOf(source);
-    return dynamicLinkOf(source, dynamicId);
+      || key.match(/^dynamic:(\d+)$/)?.[1] || (source && dynamicIdOf(source));
+    return source || dynamicId ? dynamicLinkOf(source, dynamicId) : '';
   }
 
   function renderCommentDrawer(key) {
@@ -792,7 +792,7 @@
       state.source = 'api';
     } catch (error) {
       const source = sourceByKey.get(key);
-      const fallback = source && !state.comments.length ? extractComments(source, key) : [];
+      const fallback = source && !state.comments.length ? extractComments(source) : [];
       if (fallback.length) {
         state.comments = fallback.map((comment, index) => ({ ...comment, id: `dom-${index}` }));
         state.total = state.comments.length;
@@ -821,8 +821,8 @@
     if (control) {
       control.click();
       if (status) status.textContent = '已触发打开原动态；若没有新页面，请检查浏览器弹窗拦截。';
-    } else if (status) {
-      status.textContent = '无法定位原动态链接，请刷新列表后重试。';
+    } else {
+      showToast('未找到原动态入口，请切回原版查看');
     }
   }
 
@@ -872,7 +872,9 @@
     reader.id = ID;
     reader.innerHTML = `<header class="bor-header">
       <div class="bor-header-main">
-        <div class="bor-heading"><h1>信息动态</h1><p id="bor-status" role="status">正在读取……</p></div>
+        <div class="bor-heading"><h1>关注动态</h1><p id="bor-status" role="status">正在读取…</p></div>
+        <div class="bor-header-sub"><p id="bor-refresh-status" role="status" aria-live="polite"></p></div>
+      </div>
         <div class="bor-actions">
         <select id="bor-group-filter" aria-label="按 UP 主分组筛选"></select>
         <div class="bor-filter-group" role="group" aria-label="内容类型筛选">
@@ -880,7 +882,8 @@
           <button data-filter="no-video" aria-pressed="false">排除视频</button>
           <button data-filter="text-only" aria-pressed="false">纯文字</button>
         </div>
-        <button id="bor-check-now">立即检查</button>
+        <button id="bor-new-items" hidden></button>
+        <div class="bor-tools"><button id="bor-check-now">立即检查</button>
         <details class="bor-settings-menu"><summary>设置</summary><div class="bor-settings-popover">
         <button id="bor-manage-groups">管理分组</button><button id="bor-settings">阅读与备份</button>
         <label class="bor-auto-refresh"><input id="bor-auto-refresh" type="checkbox" ${autoRefresh ? 'checked' : ''}><span>空闲刷新</span></label>
@@ -888,13 +891,7 @@
           ${[1, 3, 5, 10, 30].map(value => `<option value="${value}" ${value === refreshMinutes ? 'selected' : ''}>${value}分钟</option>`).join('')}
         </select>
         <button id="bor-original">返回原版</button>
-        </div></details>
-        </div>
-      </div>
-      <div class="bor-header-sub">
-        <p id="bor-refresh-status" role="status" aria-live="polite"></p>
-        <button id="bor-new-items" hidden></button>
-      </div>
+        </div></details></div></div>
     </header><main id="bor-feed"></main>
     <div id="bor-footer"><button id="bor-hidden-info"></button><button id="bor-load-more">继续查找更早动态</button></div>`;
     document.body.appendChild(reader);
@@ -908,7 +905,7 @@
           ? 'all'
           : value === 'scope:ungrouped' ? 'ungrouped' : value.replace(/^group:/, '');
         GM_setValue(GROUP_FILTER_KEY, groupFilter);
-        render();
+        showFilteredFeed();
       }
       if (event.target.id === 'bor-auto-refresh') {
         autoRefresh = event.target.checked;
@@ -925,6 +922,20 @@
     });
 
     reader.addEventListener('click', event => {
+      const menu = reader.querySelector('.bor-settings-menu');
+      if (!event.target.closest('.bor-settings-menu') && menu.open) menu.open = false;
+      const tag = event.target.closest('[data-group]');
+      if (tag || event.target.closest('#bor-clear-filters')) {
+        groupFilter = tag ? tag.dataset.group : 'all';
+        if (!tag) {
+          filter = 'all';
+          GM_setValue(FILTER_KEY, filter);
+        }
+        GM_setValue(GROUP_FILTER_KEY, groupFilter);
+        showFilteredFeed();
+        reader.querySelector('#bor-group-filter').focus({ preventScroll: true });
+        return;
+      }
       if (event.target.closest('#bor-settings')) { openSettings(); return; }
       const assignButton = event.target.closest('.bor-assign');
       if (assignButton) {
@@ -1018,7 +1029,7 @@
       if (button) {
         filter = button.dataset.filter;
         GM_setValue(FILTER_KEY, filter);
-        render();
+        showFilteredFeed();
       } else if (event.target.closest('#bor-original')) {
         toggle(false);
       }
@@ -1028,7 +1039,7 @@
       markActivity();
       if (reader.scrollTop < 40) document.getElementById('bor-new-items')?.setAttribute('hidden', '');
       const remain = reader.scrollHeight - reader.scrollTop - reader.clientHeight;
-      if (remain < 500 && reader.scrollHeight > reader.clientHeight + 100) requestMore();
+      if (!refreshing && remain < 350 && reader.scrollHeight > reader.clientHeight + 100) requestMore();
     }, { passive: true });
     for (const eventName of ['click', 'keydown', 'wheel', 'touchstart']) {
       reader.addEventListener(eventName, markActivity, { passive: true, capture: true });
@@ -1036,13 +1047,28 @@
     updateRefreshStatus();
   }
 
+  function showFilteredFeed() {
+    if (activeCommentKey) {
+      const state = commentStateByKey.get(activeCommentKey);
+      if (state) state.scrollTop = document.querySelector('.bor-comment-list')?.scrollTop || 0;
+      document.getElementById('bor-comment-drawer')?.remove();
+      activeCommentKey = '';
+    }
+    render();
+    document.getElementById('bor-new-items').hidden = true;
+    document.getElementById(ID).scrollTop = 0;
+  }
+
   function markActivity() {
     lastActivityAt = Date.now();
-    updateRefreshStatus();
   }
 
   function formatClock(timestamp) {
-    return timestamp ? new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '尚未检查';
+    if (!timestamp) return '尚无记录';
+    const date = new Date(timestamp);
+    return date.toDateString() === new Date().toDateString()
+      ? date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      : date.toLocaleString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   }
 
   function updateRefreshStatus() {
@@ -1065,9 +1091,7 @@
       status.textContent = `自动检查已关闭 · 上次检查：${formatClock(lastCheckedAt)}`;
       return;
     }
-    const base = Math.max(lastActivityAt, lastCheckedAt);
-    const remaining = Math.max(0, refreshMinutes * 60000 - (Date.now() - base));
-    status.textContent = `无操作 ${Math.ceil(remaining / 60000)} 分钟后检查 · 上次成功：${formatClock(lastCheckedAt)}`;
+    status.textContent = `空闲 ${refreshMinutes} 分钟后检查 · 上次更新：${formatClock(lastCheckedAt)}`;
   }
 
   function prefersReducedMotion() {
@@ -1118,7 +1142,7 @@
           if (firstGroup) {
             groupFilter = firstGroup;
             GM_setValue(GROUP_FILTER_KEY, groupFilter);
-            render();
+            showFilteredFeed();
           }
         }
       });
@@ -1136,21 +1160,30 @@
       || null;
   }
 
-  function finishRefresh(previousKeys, manual) {
-    const items = collect();
-    const newItems = items.filter(item => !previousKeys.has(item.key));
+  function newestItems(items, previousKeys) {
+    if (!previousKeys.size) return [];
+    const overlap = items.findIndex(item => previousKeys.has(item.key));
+    const previousIDs = [...previousKeys].filter(key => /^dynamic:\d+$/.test(key)).map(key => BigInt(key.slice(8)));
+    const latest = previousIDs.reduce((a, b) => a > b ? a : b, 0n);
+    return items.filter((item, index) => index < overlap ||
+      (latest > 0n && /^dynamic:\d+$/.test(item.key) && BigInt(item.key.slice(8)) > latest));
+  }
+
+  function finishRefresh(items, previousKeys, manual) {
+    const newItems = newestItems(items, previousKeys);
     const newCount = newItems.length;
     refreshing = false;
     lastCheckedAt = Date.now();
     refreshError = '';
     GM_setValue(LAST_CHECKED_KEY, lastCheckedAt);
-    render();
+    render(items);
     updateRefreshStatus();
     notifyNewItems(newItems);
     const reader = document.getElementById(ID);
     const newItemsButton = document.getElementById('bor-new-items');
-    if (newCount && reader?.scrollTop > 40 && newItemsButton) {
-      newItemsButton.textContent = `发现 ${newCount} 条新动态，回到顶部查看`;
+    const visibleCount = newItems.filter(matchesFilters).length;
+    if (visibleCount && reader?.scrollTop > 40 && newItemsButton) {
+      newItemsButton.textContent = `↑ 查看 ${visibleCount} 条新动态`;
       newItemsButton.hidden = false;
     }
     if (newCount) showToast(`已发现并载入 ${newCount} 条新动态`);
@@ -1159,6 +1192,11 @@
 
   function softRefresh(manual = false) {
     if (refreshing || document.visibilityState === 'hidden') return;
+    if (loadingMore) {
+      if (manual) showToast('正在读取更早动态，请稍后再检查');
+      return;
+    }
+    lastAttemptAt = Date.now();
     refreshing = true;
     refreshError = '';
     updateRefreshStatus();
@@ -1169,52 +1207,57 @@
       refreshing = false;
       refreshError = '未找到 B 站刷新入口，可稍后重试';
       updateRefreshStatus();
-      showToast(refreshError);
+      if (manual) showToast(refreshError);
       return;
     }
 
-    document.documentElement.classList.add('bor-loading-source');
-    window.scrollTo({ top: 0, behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
-
-    let settled = false;
+    const firstSource = () => document.querySelector('.bili-dyn-item') || document.querySelector('.bili-dyn-list__item');
+    const previousHead = firstSource();
+    const previousId = previousHead && dynamicIdOf(previousHead);
     let settleTimer = 0;
-    const complete = () => {
-      if (settled) return;
-      settled = true;
+    const stop = () => {
       clearTimeout(settleTimer);
+      clearTimeout(deadline);
       observer.disconnect();
-      document.documentElement.classList.remove('bor-loading-source');
-      finishRefresh(previousKeys, manual);
+      cancelRefresh = null;
+      refreshing = false;
+    };
+    const complete = (timedOut) => {
+      const head = firstSource();
+      const items = head ? collect() : [];
+      if (head && (head !== previousHead || dynamicIdOf(head) !== previousId || newestItems(items, previousKeys).length)) {
+        stop();
+        finishRefresh(items, previousKeys, manual);
+      } else if (timedOut) {
+        stop();
+        refreshError = '已检查，页面未确认列表更新';
+        if (head) render(items);
+        updateRefreshStatus();
+      }
     };
     const observer = new MutationObserver(records => {
-      if (!records.some(record => !record.target.closest?.(`#${ID}`))) return;
+      if (!records.some(touchesSource)) return;
       clearTimeout(settleTimer);
-      settleTimer = setTimeout(complete, 900);
+      settleTimer = setTimeout(() => complete(false), 250);
     });
-    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    observer.observe(document.body, sourceObserverOptions);
+    const deadline = setTimeout(() => complete(true), 6500);
+    cancelRefresh = stop;
     control.click();
-
-    // B 站无新内容时可能不产生可观察变更，仍在合理等待后完成检查。
-    setTimeout(complete, 6500);
   }
 
   function refreshDue(resuming = false, now = Date.now()) {
-    const base = resuming ? lastCheckedAt : Math.max(lastActivityAt, lastCheckedAt);
+    const base = Math.max(lastCheckedAt, lastAttemptAt, resuming ? 0 : lastActivityAt);
     return now - base >= refreshMinutes * 60000;
   }
 
   function checkIdleRefresh(resuming = false) {
-    updateRefreshStatus();
     if (!enabled || !autoRefresh || refreshing || document.visibilityState === 'hidden') return;
-    if (!sourceByKey.size) {
-      schedule();
-      return;
-    }
     if (refreshDue(resuming)) softRefresh(false);
   }
 
   function requestMore() {
-    if (loadingMore) return;
+    if (loadingMore || refreshing) return;
     loadingMore = true;
     const button = document.getElementById('bor-load-more');
     if (button) {
@@ -1224,7 +1267,7 @@
 
     // オーバーレイを維持したまま、背面のBilibiliページだけを末尾へ送る。
     document.documentElement.classList.add('bor-loading-source');
-    window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' });
+    window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
     setTimeout(() => {
       document.documentElement.classList.remove('bor-loading-source');
       schedule();
@@ -1256,9 +1299,11 @@
 
   function updateFeed(feed, shown, message) {
     if (!shown.length) {
-      if (feed.dataset.emptyMessage !== message || feed.children.length !== 1) {
-        feed.innerHTML = `<div class="bor-empty">${esc(message)}</div>`;
-        feed.dataset.emptyMessage = message;
+      const filtered = filter !== 'all' || groupFilter !== 'all';
+      const signature = JSON.stringify([message, filtered]);
+      if (feed.dataset.emptyMessage !== signature || feed.children.length !== 1) {
+        feed.innerHTML = `<div class="bor-empty"><p>${esc(message)}</p>${filtered ? '<button id="bor-clear-filters">清除筛选</button>' : ''}</div>`;
+        feed.dataset.emptyMessage = signature;
       }
       return;
     }
@@ -1266,9 +1311,9 @@
     delete feed.dataset.emptyMessage;
     const reader = document.getElementById(ID);
     const headerBottom = document.querySelector('.bor-header')?.getBoundingClientRect().bottom || 0;
-    const anchor = [...feed.querySelectorAll(':scope > .bor-item')].find(element =>
+    const anchor = reader.scrollTop > 0 ? [...feed.querySelectorAll(':scope > .bor-item')].find(element =>
       element.getBoundingClientRect().bottom > headerBottom
-    );
+    ) : null;
     const anchorKey = anchor?.dataset.key || '';
     const anchorTop = anchor?.getBoundingClientRect().top || 0;
     feed.querySelectorAll(':scope > :not(.bor-item)').forEach(element => element.remove());
@@ -1278,14 +1323,17 @@
     const desired = [];
 
     for (const item of shown) {
-      const template = document.createElement('template');
-      template.innerHTML = card(item).trim();
-      const fresh = template.content.firstElementChild;
+      const assigned = groupsFor(item.author, item.authorId);
+      const signature = JSON.stringify([item, assigned, activeCommentKey === item.key]);
       const old = existing.get(item.key);
-      if (old && old.dataset.renderState === fresh.dataset.renderState) {
+      if (old && old.borSignature === signature) {
         desired.push(old);
         existing.delete(item.key);
       } else {
+        const template = document.createElement('template');
+        template.innerHTML = card(item, assigned).trim();
+        const fresh = template.content.firstElementChild;
+        fresh.borSignature = signature;
         if (old) {
           old.replaceWith(fresh);
           existing.delete(item.key);
@@ -1304,28 +1352,33 @@
     }
   }
 
-  function render() {
+  function matchesFilters(item) {
+    const typeMatches = filter === 'all'
+      || (filter === 'no-video' && item.kind !== 'video')
+      || (filter === 'text-only' && item.kind === 'text');
+    const assigned = groupsFor(item.author, item.authorId);
+    return typeMatches && (groupFilter === 'all'
+      || (groupFilter === 'ungrouped' && assigned.length === 0)
+      || assigned.includes(groupFilter));
+  }
+
+  function render(items) {
     if (!enabled) return;
     mount();
-    const all = collect();
-    const shown = all.filter(item => {
-      const typeMatches = filter === 'all'
-        || (filter === 'no-video' && item.kind !== 'video')
-        || (filter === 'text-only' && item.kind === 'text');
-      const assigned = groupsFor(item.author, item.authorId);
-      const groupMatches = groupFilter === 'all'
-        || (groupFilter === 'ungrouped' && assigned.length === 0)
-        || assigned.includes(groupFilter);
-      return typeMatches && groupMatches;
-    });
+    const all = items || collect();
+    const shown = all.filter(matchesFilters);
     const feed = document.getElementById('bor-feed');
     const status = document.getElementById('bor-status');
     if (!feed || !status) return;
     updateFeed(feed, shown, emptyMessage(all, shown));
     const hiddenTotal = hiddenStats.live + hiddenStats.charging + hiddenStats.empty;
-    status.textContent = `已扫描 ${all.length + hiddenTotal} 条，显示 ${shown.length} 条`;
+    const summary = `显示 ${shown.length} / ${all.length + hiddenTotal} 条`;
+    if (status.textContent !== summary) status.textContent = summary;
     const hiddenInfo = document.getElementById('bor-hidden-info');
-    if (hiddenInfo) hiddenInfo.textContent = hiddenTotal ? `已隐藏 ${hiddenTotal} 条（查看原因）` : '没有隐藏内容';
+    if (hiddenInfo) {
+      hiddenInfo.hidden = !hiddenTotal;
+      hiddenInfo.textContent = `已过滤 ${hiddenTotal} 条`;
+    }
     updateGroupSelect();
     document.querySelectorAll(`#${ID} [data-filter]`).forEach(button => {
       const active = button.dataset.filter === filter;
@@ -1335,8 +1388,8 @@
   }
 
   function schedule() {
-    clearTimeout(timer);
-    timer = setTimeout(render, 180);
+    if (!enabled || timer) return;
+    timer = setTimeout(() => { timer = 0; if (!refreshing) render(); }, 180);
   }
 
   function toggle(next) {
@@ -1347,6 +1400,9 @@
       mount();
       schedule();
     } else {
+      cancelRefresh?.();
+      clearTimeout(timer);
+      timer = 0;
       activeCommentKey = '';
       document.getElementById(ID)?.remove();
     }
@@ -1357,8 +1413,9 @@
     style.textContent = `
       #bor-reader :focus-visible { outline: 2px solid #365a82; outline-offset: 3px; }
       .bor-settings-menu { position: relative; }
-      .bor-settings-menu summary { cursor: pointer; padding: 6px 11px; border: 1px solid #cbd2da; border-radius: 4px; }
-      .bor-settings-popover { position: absolute; right: 0; top: 100%; min-width: 240px; padding: 14px; background: #fff; border: 1px solid #cbd2da; display: grid; gap: 10px; box-shadow: 0 6px 20px #0002; }
+      .bor-settings-menu summary { cursor: pointer; padding: 5px 10px; border-radius: 4px; color: #52605c; }
+      .bor-settings-menu summary:hover, .bor-settings-menu[open] summary { background: #eaf0ec; }
+      .bor-settings-popover { position: absolute; right: 0; top: calc(100% + 6px); width: min(236px, 80vw); max-height: 55vh; overflow: auto; overscroll-behavior: contain; padding: 14px; background: #fff; border-radius: 6px; border: 1px solid #cdd6d0; display: grid; gap: 8px; box-shadow: 0 8px 24px #1c352817; }
       #bor-reader .bor-content { font-size: var(--bor-font-size, 15px); line-height: var(--bor-line-height, 1.8); }
       #bor-reader .bor-comment-content { font-size: var(--bor-font-size, 15px); line-height: var(--bor-line-height, 1.8); }
       #bor-reader .bor-time, #bor-reader .bor-assign, #bor-reader .bor-header p, #bor-reader .bor-comment-meta span { color: #606b79; }
@@ -1371,21 +1428,24 @@
       html.bor-enabled.bor-loading-source body { overflow: auto !important; }
       #bor-reader {
         position: fixed; inset: 0; z-index: 2147483647; overflow-y: auto;
-        color: #222831; background: #f3f5f7;
+        --bor-accent: #315d50; --bor-rule: #dce2dc; --bor-width: 900px;
+        color-scheme: light; scrollbar-gutter: stable;
+        color: #232d29; background: #f5f6f2; scroll-padding-block: 135px 20px;
         font: 14px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI",
           "Microsoft YaHei", sans-serif;
       }
       #bor-reader * { box-sizing: border-box; }
       .bor-header {
         position: sticky; top: 0; z-index: 2;
-        padding: 12px max(24px, calc((100vw - 980px) / 2)) 9px;
-        border-bottom: 1px solid #d8dde3; background: rgba(255,255,255,.97);
+        padding: 17px max(20px, calc((100% - var(--bor-width)) / 2)) 11px;
+        border-bottom: 1px solid var(--bor-rule); background: #fafbf8;
       }
       .bor-header-main {
-        display: flex; justify-content: space-between; align-items: center; gap: 24px;
+        display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 11px;
       }
-      .bor-heading { min-width: 150px; }
-      .bor-header h1 { margin: 0; font-size: 18px; font-weight: 650; }
+      .bor-heading { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+      .bor-header h1 { margin: 0; color: #223e33; font: 650 24px/1.2 Georgia, "Songti SC", "SimSun", serif; letter-spacing: .035em; }
+      #bor-status { font-variant-numeric: tabular-nums; white-space: nowrap; }
       .bor-header p { margin: 2px 0 0; color: #7a8491; font-size: 12px; }
       .bor-header-sub {
         display: flex; align-items: center; justify-content: space-between; gap: 12px;
@@ -1397,18 +1457,19 @@
         font: inherit; font-size: 12px; cursor: pointer;
       }
       #bor-new-items:hover { color: #1f3f5d; text-decoration: underline; }
-      .bor-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
-      .bor-filter-group { display: inline-flex; }
+      .bor-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+      .bor-tools { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+      .bor-filter-group { display: inline-flex; background: #edf0eb; padding: 2px; border-radius: 5px; }
       .bor-actions button {
         border: 1px solid #cbd2da; border-radius: 4px; padding: 6px 11px;
         color: #4b5563; background: #fff; cursor: pointer;
       }
       .bor-actions button:disabled { color: #8a939e; background: #f3f5f7; cursor: wait; }
-      .bor-actions .bor-filter-group button { border-radius: 0; margin-left: -1px; }
-      .bor-actions .bor-filter-group button:first-child { margin-left: 0; border-radius: 4px 0 0 4px; }
-      .bor-actions .bor-filter-group button:last-child { border-radius: 0 4px 4px 0; }
+      .bor-actions .bor-filter-group button { border: 0; padding: 5px 11px; background: transparent; }
+      .bor-actions .bor-filter-group button:hover { background: #e0e7df; }
+      .bor-actions .bor-filter-group button.active { color: white; background: var(--bor-accent); box-shadow: none; }
       .bor-actions select {
-        min-width: 120px; border: 1px solid #cbd2da; border-radius: 4px;
+        width: 9.5em; max-width: 100%; border: 1px solid #cbd2da; border-radius: 4px;
         padding: 6px 28px 6px 9px; color: #374151; background: #fff;
       }
       .bor-auto-refresh {
@@ -1421,30 +1482,31 @@
       }
       .bor-actions button.active { box-shadow: inset 0 -2px 0 #596579; }
       #bor-feed {
-        width: min(980px, calc(100% - 40px)); margin: 18px auto;
-        border: 1px solid #d9dee5; border-bottom: 0; background: #fff;
+        width: min(var(--bor-width), calc(100% - 40px)); margin: 18px auto;
+        border: 1px solid var(--bor-rule); border-top: 2px solid #778e7e; border-bottom: 0; background: #fff;
       }
       .bor-item {
-        padding: 16px 20px 15px; border-bottom: 1px solid #e2e6eb;
+        padding: 20px clamp(18px, 3.5vw, 44px) 15px; border-bottom: 1px solid var(--bor-rule);
         content-visibility: auto; contain-intrinsic-size: auto 180px;
       }
-      .bor-item:hover { background: #fafbfc; }
-      .bor-meta { display: flex; align-items: center; gap: 8px 10px; flex-wrap: wrap; margin-bottom: 7px; }
+      .bor-meta { display: flex; align-items: baseline; gap: 4px 10px; flex-wrap: wrap; margin-bottom: 10px; }
+      .bor-item-actions { display: flex; align-items: center; gap: 0 14px; flex-wrap: wrap; margin-top: 8px; }
+      #bor-reader .bor-item-actions > * { margin: 0; padding-block: 4px; }
       .bor-author { color: #1f2937; font-weight: 650; }
       .bor-time { color: #89929e; font-size: 12px; }
       .bor-group-tags { display: inline-flex; gap: 4px; flex-wrap: wrap; }
       .bor-group-tag {
-        padding: 0 6px; border-radius: 9px; color: #596579;
-        background: #edf1f5; font-size: 11px;
+        border: 0; padding: 2px 7px; border-radius: 3px; color: #365c4d;
+        background: #eaf1ea; font: inherit; font-size: 12px; cursor: pointer;
       }
+      .bor-group-tag:hover { background: #d5e4d8; }
       .bor-assign {
         padding: 0; border: 0; color: #9aa2ac; background: transparent;
         font: inherit; font-size: 11px; cursor: pointer;
       }
       .bor-assign:hover { color: #475569; text-decoration: underline; }
       .bor-type {
-        margin-left: auto; padding: 1px 7px; border: 1px solid #d7dce2;
-        border-radius: 10px; color: #7b8490; font-size: 11px;
+        margin-left: auto; color: #5d6861; font-size: 12px;
       }
       .bor-content { white-space: pre-wrap; overflow-wrap: anywhere; }
       .bor-media {
@@ -1470,7 +1532,8 @@
       .bor-expand:hover { color: #1f2937; text-decoration: underline; }
       .bor-expand:disabled { color: #929ba6; cursor: default; text-decoration: none; }
       .bor-link:hover { color: #1f2937; text-decoration: underline; }
-      .bor-empty { padding: 60px 20px; color: #77818e; text-align: center; }
+      .bor-empty { padding: 48px 20px; color: #55635a; text-align: center; }
+      #bor-clear-filters { margin-top: 10px; padding: 6px 12px; border: 1px solid var(--bor-rule); border-radius: 4px; background: white; color: var(--bor-accent); cursor: pointer; }
       #bor-footer {
         display: flex; justify-content: center; align-items: center; gap: 14px;
         padding: 4px 0 28px; color: #929ba6; font-size: 12px;
@@ -1491,7 +1554,7 @@
       }
       .bor-modal {
         width: min(520px, 100%); max-height: min(720px, calc(100vh - 40px));
-        overflow: auto; border: 1px solid #cfd5dc; border-radius: 8px;
+        overflow: auto; overscroll-behavior: contain; border: 1px solid #cfd5dc; border-radius: 8px;
         background: #fff; box-shadow: 0 18px 55px rgba(0,0,0,.18);
       }
       .bor-modal > header {
@@ -1524,7 +1587,7 @@
       .bor-delete-group { color: #9b4b4b !important; }
       #bor-comment-drawer {
         position: fixed; top: 0; right: 0; bottom: 0; z-index: 4;
-        display: grid; grid-template-rows: auto minmax(0, 1fr) auto auto;
+        display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto auto;
         width: min(470px, 94vw); border-left: 1px solid #ccd2da;
         color: #222831; background: #fff; box-shadow: -12px 0 36px rgba(0,0,0,.12);
       }
@@ -1533,6 +1596,10 @@
         padding: 14px 16px; border-bottom: 1px solid #e1e5ea;
       }
       #bor-comment-drawer h2 { margin: 0; font-size: 16px; }
+      #bor-comment-drawer header > div { min-width: 0; }
+      .bor-comment-close { flex-shrink: 0; }
+      .bor-media, .bor-meta, .bor-check, .bor-comment-meta { overflow-wrap: anywhere; }
+      .bor-group-tag, .bor-group-tags { max-width: 100%; overflow-wrap: anywhere; }
       #bor-comment-drawer header p { margin: 2px 0 0; color: #8a939e; font-size: 12px; }
       .bor-comment-close {
         width: 32px; height: 32px; border: 0; color: #667085;
@@ -1573,12 +1640,22 @@
         font-size: 13px;
       }
       @media (max-width: 720px) {
-        .bor-header { padding: 10px 16px 8px; }
-        .bor-header-main { align-items: flex-start; flex-direction: column; gap: 8px; }
-        .bor-actions { justify-content: flex-start; }
-        .bor-header-sub { align-items: flex-start; flex-direction: column; gap: 2px; }
+        .bor-header { padding: 10px 14px 8px; }
+        .bor-header-main { flex-wrap: wrap; gap: 2px 12px; margin-bottom: 7px; }
+        .bor-header h1 { font-size: 21px; }
+        .bor-header-sub { min-height: 0; margin-top: 0; }
         #bor-feed { width: calc(100% - 20px); margin: 10px auto; }
         .bor-item { padding: 14px; }
+      }
+      @media (max-width: 480px) {
+        .bor-actions { gap: 6px; }
+        .bor-actions select { width: 8.5em; padding-right: 5px; }
+        .bor-actions .bor-filter-group button { padding-inline: 7px; }
+        .bor-header-main { align-items: start; }
+        .bor-heading { gap: 8px; }
+        .bor-settings-popover { max-height: 45vh; }
+        #bor-reader { scroll-padding-top: 172px; }
+        .bor-comment-context { max-width: 100%; }
       }
       @media (prefers-reduced-motion: reduce) {
         #bor-reader { scroll-behavior: auto; }
@@ -1587,13 +1664,23 @@
     document.head.appendChild(style);
   }
 
+  const sourceObserverOptions = { childList: true, subtree: true, characterData: true,
+    attributes: true, attributeFilter: ['data-did', 'data-dynamic-id', 'data-dynamic-id-str', 'data-url'] };
+
+  function touchesSource(record) {
+    const target = record.target.nodeType === 1 ? record.target : record.target.parentElement;
+    if (!target || target.closest('#bor-reader')) return false;
+    if (target.closest(SOURCE_SELECTOR)) return true;
+    return [...record.addedNodes, ...record.removedNodes].some(node =>
+      node.nodeType === 1 && node.id !== ID && (node.matches(SOURCE_SELECTOR) || node.querySelector(SOURCE_SELECTOR)));
+  }
+
   function init() {
     installStyle();
     new MutationObserver(records => {
-      if (records.some(record => !record.target.closest?.(`#${ID}`))) schedule();
-    }).observe(document.body, { childList: true, subtree: true });
+      if (enabled && !refreshing && records.some(touchesSource)) schedule();
+    }).observe(document.body, sourceObserverOptions);
     toggle(enabled);
-    [600, 1600, 3200].forEach(delay => setTimeout(schedule, delay));
     setInterval(() => checkIdleRefresh(false), 15000);
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') checkIdleRefresh(true);

@@ -2,6 +2,13 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.2.0] - 2026-11-18
+
+- 关注动态采用窄行宽阅读版式。点击作者旁的分组标签即可筛选，空结果可一键清除筛选。
+- 检查时根据动态列表变化记录更新时间。超时显示未确认，切换窗口会遵守检查间隔，加载更早动态时避免重复触发刷新。
+- 优先使用动态自身的 ID，避免误用正文引用的动态链接。视频卡片优先提取标题，可见的充电正文不会仅因标有“充电专属”而被过滤。
+- 复用未变化的阅读卡片，缩小页面变化监听范围。开发时可直接打开离线样例检查界面。
+
 ## [1.1.0] - 2026-11-17
 
 ### 修复
@@ -40,5 +47,6 @@
 - 保留 0.8.x 与 0.9.x 使用的设置和分组存储键。
 - 适配 `https://t.bilibili.com/*`。
 
+[1.2.0]: https://github.com/Hedwynnn/bilibili-office-reader/releases/tag/v1.2.0
 [1.1.0]: https://github.com/Hedwynnn/bilibili-office-reader/releases/tag/v1.1.0
 [1.0.0]: https://github.com/Hedwynnn/bilibili-office-reader/releases/tag/v1.0.0

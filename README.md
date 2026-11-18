@@ -5,7 +5,7 @@
 <h1 align="center">Bilibili Office Reader</h1>
 
 <p align="center">
-  <a href="https://github.com/Hedwynnn/bilibili-office-reader/releases/tag/v1.1.0"><img alt="Version 1.1.0" src="https://img.shields.io/badge/version-1.1.0-ef7f72"></a>
+  <a href="https://github.com/Hedwynnn/bilibili-office-reader/releases/tag/v1.2.0"><img alt="Version 1.2.0" src="https://img.shields.io/badge/version-1.2.0-ef7f72"></a>
   <a href="./LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-566273"></a>
   <a href="https://t.bilibili.com/"><img alt="Bilibili dynamics" src="https://img.shields.io/badge/runs%20on-t.bilibili.com-2f3845"></a>
 </p>
@@ -59,7 +59,7 @@
 
 ## 使用
 
-- 页面顶部工具栏可切换内容类型、作者分组以及手动刷新。
+- 顶部工具栏可切换内容类型、作者分组以及手动检查。点击作者旁的“财经”等标签可以直接只看该组，选择“全部UP主”即可看回所有分组。
 - 动态下方的“查看评论”打开右侧评论抽屉；再次点击同一按钮可收起。
 - 用户脚本管理器菜单中的“阅读与备份”用于调整显示、通知和配置备份。
 - 系统通知默认关闭，需要时可在设置中主动开启。
@@ -95,7 +95,7 @@ npm run verify
 pnpm run verify
 ```
 
-自动化测试使用 jsdom 和模拟的用户脚本存储、网络响应，不能代替真实浏览器回归。发布前仍需在已登录的 B 站页面检查安装、筛选、分组、长文、评论、刷新和配置迁移。
+直接用浏览器打开 [离线预览](./tests/preview.html) 的本地文件，可以体验筛选、评论和刷新。样例使用虚构动态，设置仅在该页内存中保存。自动化测试使用 jsdom 和模拟响应。发布前请用已登录的 B 站页面验证原生刷新入口、充电卡片和评论接口。
 
 ## 反馈与贡献
 

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>关注动态 · 离线预览</title>
+<style>.bili-rich-text__content { white-space: pre-wrap; }</style>
+<body>
+<button class="bili-dyn-list__notification">查看新动态</button>
+<section id="samples"></section>
+<script>
+  const samples = document.querySelector('#samples');
+  const settings = new Map([
+    ['bilibili-office-reader-groups', ['财经', '游戏']],
+    ['bilibili-office-reader-author-groups', { 'name:窗边手记': ['财经'], 'name:峡谷观察': ['游戏'] }]
+  ]);
+  window.GM_getValue = (key, fallback) => settings.get(key) ?? fallback;
+  window.GM_setValue = (key, value) => settings.set(key, value);
+  window.GM_registerMenuCommand = () => {};
+  window.GM_xmlhttpRequest = ({ onload }) => onload({ status: 200, responseText: JSON.stringify({
+    code: 0, data: { cursor: { is_end: true, next: 1 }, replies: [
+      { rpid_str: '7', member: { uname: '纸飞机' }, content: { message: '这个观察角度有意思，等下一篇。' } }
+    ] }
+  }) });
+  function post(id, author, time, body, video = '') {
+    const el = document.createElement('article');
+    el.className = 'bili-dyn-item';
+    el.dataset.did = id;
+    el.innerHTML = `<b class="bili-dyn-title__text">${author}</b><small class="bili-dyn-time">${time}</small>
+      <p class="bili-rich-text__content">${body}</p>${video ? '<div class="bili-dyn-card-video__title">' + video + '</div>' : ''}
+      <button class="bili-dyn-action comment">1</button><bili-comments data-params="17,${id}"></bili-comments>`;
+    return el;
+  }
+  samples.append(
+    post(103, '窗边手记', '12 分钟前', '翻了两家小店的账本，我最想看的其实是那行租金。\n\n同一条街，一家把靠窗的位置留给了常客，另一家把它改成了外带取餐口。客流差不多，账本上的故事却很不一样。'),
+    post(102, '峡谷观察', '36 分钟前', '回看最后一波团，辅助提前十秒放的那个眼，比最后的击杀更值得看。', '决胜局回放：河道视野是怎么丢的'),
+    post(101, '慢速通讯', '1 小时前', '今天绕远走了一站，发现以前买杂志的书店还开着。')
+  );
+  let nextId = 104;
+  document.querySelector('.bili-dyn-list__notification').onclick = () =>
+    samples.prepend(post(nextId++, '窗边手记', '刚刚', '补充一条刚看到的读者来信。'));
+</script>
+<script src="../bilibili-office-reader.user.js"></script>
+</body>
+</html>

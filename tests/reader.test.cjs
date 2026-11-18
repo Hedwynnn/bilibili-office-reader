@@ -17,8 +17,41 @@ let passed = 0;
 function check(name, fn) { fn(); passed++; console.log('PASS', name); }
 (async () => {
   t.render();
+  check('两个安装文件逐字节一致', () => assert.deepEqual(fs.readFileSync('bilibili-office-reader.txt'), fs.readFileSync('bilibili-office-reader.user.js')));
   const source = w.document.querySelector('.bili-dyn-item');
   const key = t.extract(source).key;
+  function fixture(markup) {
+    const el = w.document.createElement('article');
+    el.className = 'bili-dyn-item';
+    el.innerHTML = markup;
+    return el;
+  }
+  check('充电标识保留正文，明确解锁提示才隐藏', () => {
+    const el = fixture('<span class="charging-label">充电专属</span><p class="bili-rich-text__content">正文提到了充电可见</p>');
+    assert.equal(t.extract(el).content, '正文提到了充电可见');
+    el.innerHTML += '<div class="paywall">充电后查看</div>';
+    assert.equal(t.extract(el).skipReason, 'charging');
+  });
+  check('正文引用链接不串帖，复用卡片采用新动态 ID', () => {
+    const el = fixture('<p class="bili-rich-text__content"><a href="https://www.bilibili.com/opus/999">昨天那条</a></p>');
+    assert.equal(t.extract(el).dynamicId, '');
+    el.dataset.did = '101'; assert.equal(t.extract(el).key, 'dynamic:101');
+    el.dataset.did = '102'; assert.equal(t.extract(el).key, 'dynamic:102');
+  });
+  check('视频标题只出现一次，不抓取播放量和时长', () => {
+    const el = fixture('<div class="bili-dyn-content">00:30 <b class="bili-dyn-card-video__title">视频标题</b> 999</div>');
+    assert.equal(t.extract(el).content, '视频标题');
+    assert.equal(t.extract(el).mediaTitle, '');
+  });
+  check('点分组标签进入筛选，空结果可以一键复原', () => {
+    w.document.querySelector('.bor-group-tag').click();
+    assert.equal(w.document.querySelector('#bor-group-filter').value, 'group:财经');
+    const select = w.document.querySelector('#bor-group-filter');
+    select.value = 'scope:ungrouped'; select.dispatchEvent(new w.Event('change', { bubbles: true }));
+    w.document.querySelector('#bor-clear-filters').click();
+    assert.equal(select.value, 'scope:all');
+    assert.ok(w.document.querySelector('.bor-comments'));
+  });
   check('切回页面按上次成功检查时间判断过期', () => { assert.equal(t.refreshDue(true, 299999), false); assert.equal(t.refreshDue(true, 300000), true); });
   check('刷新控件具有可访问状态', () => { assert.equal(w.document.querySelector('#bor-group-filter').getAttribute('aria-label'), '按 UP 主分组筛选'); assert.equal(w.document.querySelector('#bor-refresh-status').getAttribute('aria-live'), 'polite'); });
   check('旧名称分组在取得 UID 后仍可读', () => assert.equal(t.groupsFor('测试作者', '999')[0], '财经'));
@@ -63,5 +96,42 @@ function check(name, fn) { fn(); passed++; console.log('PASS', name); }
   const controls = [...w.document.querySelectorAll('.bor-modal button, .bor-modal input, .bor-modal select')];
   controls.at(-1).focus(); controls.at(-1).dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
   check('模态框键盘焦点循环', () => assert.equal(w.document.activeElement, controls[0]));
+  w.document.querySelector('.bor-modal-close').click();
+  const refreshControl = w.document.createElement('button');
+  refreshControl.className = 'bili-dyn-list__notification';
+  refreshControl.textContent = '查看新动态';
+  w.document.body.append(refreshControl);
+  const clock = new Map();
+  let timerId = 0;
+  w.setTimeout = (run, delay) => { clock.set(++timerId, { run, delay }); return timerId; };
+  w.clearTimeout = id => clock.delete(id);
+  function tick(delay) {
+    const task = [...clock].find(([, task]) => task.delay === delay);
+    assert.ok(task, '等待中的定时器 ' + delay);
+    clock.delete(task[0]);
+    task[1].run();
+  }
+  const confirmedKey = 'bilibili-office-reader-last-successful-check';
+  w.document.querySelector('#bor-check-now').click();
+  w.document.body.append(w.document.createElement('small'));
+  await flush();
+  tick(6500);
+  check('刷新超时或无关页面变化不写成功时间', () => {
+    assert.equal(storage.has(confirmedKey), false);
+    assert.match(w.document.querySelector('#bor-refresh-status').textContent, /未确认/);
+    assert.equal(t.refreshDue(true), false);
+  });
+  refreshControl.onclick = () => {
+    source.before(fixture('<div class="bili-rich-text__content">新动态</div>'));
+    source.after(fixture('<div class="bili-rich-text__content">历史动态</div>'));
+  };
+  w.document.querySelector('#bor-check-now').click();
+  await flush();
+  tick(250);
+  check('刷新确认首条变化，只计算顶部新增并清理超时', () => {
+    assert.ok(storage.get(confirmedKey));
+    assert.match(w.document.querySelector('#bor-toast').textContent, /1 条新动态/);
+    assert.equal([...clock.values()].some(task => task.delay === 6500), false);
+  });
   console.log(`${passed} tests passed`);
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => w.close());
